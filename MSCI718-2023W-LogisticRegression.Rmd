@@ -1,0 +1,270 @@
+---
+title: "Individual Assignment 4"
+author: "Sina Bahrami"
+subtitle: "Logistic Regression"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+    number_sections: true
+  word_document: default
+geometry: margin=1.1cm
+---
+\vspace{-1cm}
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+remove(list=ls())
+library(dplyr)
+library(tidyr)
+library(readr)
+library(magrittr)
+library(ggplot2)
+# library(knitr)
+library(pastecs)
+library(GGally)
+library(lmtest)
+# library(desc)
+library(car)
+# library(leaps) # All-subsets method: regsubsets
+# library(boot)
+# library(ggm)
+# library(corrplot)
+
+options(digits=4)
+```
+
+```{r helper_functions, echo=FALSE, eval=FALSE}
+detect_outlier <- function(x) {
+  
+  Quantile1 <- quantile(x, probs=.25, na.rm = TRUE)
+  Quantile3 <- quantile(x, probs=.75, na.rm = TRUE)
+  IQR = Quantile3-Quantile1
+  x > Quantile3 + (IQR*1.5) | x < Quantile1 - (IQR*1.5)
+}
+
+# Takes a data frame and a column and removes the outliers from the
+# original data frame
+remove_outlier <- function(dataframe, columns=names(dataframe)) {
+  # for loop to traverse in columns vector
+  for (colmn in columns) {
+    # remove observation if it satisfies outlier function
+    dataframe <- dataframe[!detect_outlier(dataframe[[colmn]]), ]
+  }
+  return(dataframe)
+}
+```
+
+# Part 1: Data pre-processing
+The data are imported from the Kaggle website [1]. It represents marketing campaign of a financial institution.  
+```{r load_data, fig.width=4, fig.height=4, echo=FALSE}
+df_main <- read.csv(file="bank.csv",
+                    na.strings = c("unknown", "Unknown", "NA", "na"),
+                    stringsAsFactors = TRUE
+)
+```
+The dataset is of shape `r dim(df_main)` and the variables are `r names(df_main)`. The definitions of the variables are obtained from [2] and are provided in the appendix.
+
+## Exploratory data analysis
+```{r EDA, eval=TRUE, echo=FALSE, eval=FALSE}
+columns <- names(df_main)
+head(df_main)
+str(df)
+stat.desc(df_main)
+factor_cols <- df_main %>%
+  select(where(is.factor)) %>%
+  names()
+
+print("The levels of the factor variables are provided below:")
+sapply(df_main[factor_cols], levels)
+
+df_main %<>%
+  mutate(
+    education=factor(education, c("unknown", "primary", "secondary", "tertiary")),
+    marital = factor(marital, c("single", "married", "divorced")),
+    deposit = relevel(deposit, "no"),
+    poutcome = factor(poutcome, c("failure", "success", "other", "unknown")),
+    housing = relevel(housing, "no"),
+  )
+
+
+continuous_cols <- columns[!(columns %in% factor_cols)]
+df_long <- df_main %>%
+  pivot_longer(cols=continuous_cols, names_to="variable", values_to="value")
+ggplot(df_long) +
+  geom_boxplot(aes(y = value)) +
+  facet_wrap(~variable, scales="free" )
+
+
+# Exploration of factor variables
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=education))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=marital))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=housing))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=loan))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=job)) +
+  theme(axis.text=element_text(angle = 90))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=marital))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=age))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=balance))
+ggplot(df_main, aes(x=balance, y=deposit)) +
+  geom_jitter(height=0.3, width=0.3, size=1, color="#00abff22") +
+  scale_x_continuous(limits = c(0,10000))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=campaign))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=contact))
+ggplot(df_main, aes(fill=deposit)) +
+  geom_bar(position="dodge", aes(x=default))
+```
+The results of the exploratory data analysis, as provided in the appendix, are explained below.
+
+* The data is tidy and in good format, and no cleaning is required.
+* Based on the summary of the data, there are no missing values.
+* Box plots suggest presence of outliers, but the values are in a reasonable range so they are kept.
+* The variables "poutcome" and "education" have "unknown" values. The observations that contain "unknown" should be dropped if the variables are used as predictors in the model because they are not basically a separate category.
+* Number of contacts made during the campaign with the client ("campaign") is intuitively expected to have impact on subscription to the term deposit, but the histogram implies no strong correlation.
+* Balance doesn't seems to have strong impact but intuitively it may have so it is kept.
+* Also based on the intuition and the bar plot:
+    + Clients without housing are more likely to subscribe to the term deposit.
+    + Married clients seem to have less tendency to subscribe to the term deposit.
+    + Clients with tertiary education are more likely to subscribe to the term deposit than people with lower levels of education.
+    + Interestingly people at age range of 30-60 seem to be more likely to subscribe to the term deposit.
+    + Certain job categories like retired, management, student and unemployed seem to be more likely to make the subscription.
+    + Clients with loan seems to be less likely to subscribe.
+    + The majority of the clients have no credit in default so it cannot be a very useful predictors.
+    + The contacts have many "unknown", so it is not considered among the predictors.
+
+# Part 2: Planning
+```{r planning, warning=FALSE, fig.width=12, echo=FALSE}
+sel_variables <- c("marital", "housing", "loan", "education", "job", "age", "balance", "campaign", "deposit")
+```
+## Problem statement
+Following the data pre-processing and some exploratory data analysis, in the rest of this study, we would like to adopt a model so that we can predict whether the customer is going to subscribe to a term deposit which is specified by the "deposit" variable.The prediction model can be used to decide on the best campaigning strategy to increase the number of subscriptions.
+
+## Variable selection
+
+* Because the outcome variable ("deposit") is of a binary nature, a logistic regression model can be adopted to predict the outcome variable.
+* According to [2], the variable "duration" is a very deciding factor in the outcome, but cannot be used because it is not known until the customer is contacted, hence not useful for adopting a campaigning strategy.
+* As explained in the EDA section, there seems to be an effect from the variable "age" as to whether it is in the range of 30-60 or not. By converting "age" to a categorical variable instead of a continuous one, we can capture this effect.
+* Based on the bar plots, tertiary education has stronger effect compared to other levels, so the variable is converted to a binary or "tertiary".
+* According to the explanation in the exploratory data analysis section, the following predictors are chosen to predict subscription to the term deposit ("deposit"): `r sel_variables`.
+* The outcome is binary variable (yes/no) and the predictors are a combination of continuous and categorical variables.
+```{r modify_predictors, echo=FALSE}
+df_model <- df_main %>%
+  mutate(
+    mid_age=as.factor(if_else(age>=30 & age<=60, "yes", "no")),
+    tertiary=as.factor(if_else(education=="tertiary", "yes", "no")))
+sel_variables <- c("marital", "housing", "loan", "tertiary", "job", "mid_age", "balance", "campaign", "deposit")
+df_model <- df_model[sel_variables]
+```
+## Assumptions of the model
+The assumptions of the logistic regression model include: independence of errors, multicollinearity, incomplete information and complete separation. The last two assumptions are fulfilled based on the plots of the exploratory data analysis. The first three assumptions, however, need to be checked after creating the model.
+
+# Part 3: Analysis
+## Base model
+```{r logistic_reg, echo=FALSE}
+deposit_model1 <- glm(deposit ~ marital + housing + loan + tertiary + job + mid_age + balance + campaign, family=binomial, data=na.omit(df_model))
+model1_summary <- summary(deposit_model1)
+```
+
+```{r model_summary, echo=FALSE, eval=FALSE}
+print(summary(deposit_model1))
+print(exp(confint(deposit_model1)))
+```
+A logistic regression model is adopted using **marital, housing, loan, tertiary, job, mid_age, balance and campaign** as the predictors. The summary is provided in the appendix. It shows that all of the predictors except "jobunemployed" and "maritaldivorced" are statistically significant. Also by obtaining exponent of the 95% confidence interval of each coefficient, the odds ratio $e^\beta$ corresponding to each coefficient, which represents the effect size, is presented in the appendix. The predictors with $e^\beta$ close to 1 are removed from the alternative model.
+```{r linearity_check, echo=FALSE}
+df_model %<>%
+  mutate(
+    log_campaign=log(campaign)
+  )
+deposit_vs_campaign <- glm(deposit ~ campaign + log_campaign, family=binomial,
+                     data=na.omit(df_model))
+```
+```{r multicollinearity_check, warning=FALSE, echo=FALSE}
+vif_res <- vif(deposit_model1)
+avg_vif <- mean(vif_res[,3])
+```
+```{r independence_check, warning=FALSE, echo=FALSE}
+# Durbin-Watson test dwtest
+dw_res <- dwtest(deposit_model1)
+```
+
+* The only continuous variable in the model is "campaign". The linearity for this predictor needs to be checked. The p-value is `r summary(deposit_vs_campaign)$coefficient[3,4]`, so the linearity is rejected at 5% level of significance. The predictor is removed from the model because its effect is not considerable too ($e^\beta$ close to 0.9).
+* Multicollinearity is checked by evaluating VIF criteria. For all of the predictors the VIF is close to 1 with the average of `r avg_vif`. So there is no multicollinearity, hence no issue in this regard.
+* For the independence of the errors, similar to linear regression, Durbin-Watson test is performed. The statistics value is `r dw_res$statistic` with a p-value of near `r dw_res$p.value`, so the independence of errors is rejected.
+
+## The alternative model
+In the alternative model, the predictors with less statistical significance ("jobunemployed" and "maritaldivorced") are removed, also the predictors with a small effect size are removed, so "balance" is removed and the category of marital is changed to a binary with the two states of "married" or not. As a result the new predictors are **housing, loan, tertiary and mid_age**. The summary of the model is provided in the appendix.
+
+```{r modify_predictors2, echo=FALSE}
+# Marital is changed to married or not
+df_model2 <- df_model %>%
+  mutate(married=as.factor(if_else(marital=="married", "yes", "no"))) %>%
+  select(!c("marital","balance"))
+```
+
+```{r model2, echo=FALSE}
+deposit_model2 <- glm(deposit ~ housing + loan + tertiary + mid_age, family=binomial, data=na.omit(df_model2))
+model2_summary <- summary(deposit_model2)
+```
+```{r model2_summary, echo=FALSE, eval=FALSE}
+model2_summary
+exp(confint(deposit_model2))
+```
+```{r independence_check2, warning=FALSE, echo=FALSE}
+# Durbin-Watson test dwtest
+dw_res2 <- dwtest(deposit_model2)
+```
+
+* The new model has no continuous variables, so there is no need for linearity check.
+* There is no multicollinearity because the base model, which includes all of the predictors in this model, is not multicolinear.
+* For independence of errors, the p-value of the Durbin-Watson test is `r dw_res2$p.value`, so the independence is again rejected, so neither model 2 can be considered a valid model.
+
+## Model comparison
+Despite the rejection of the independence assumption, for the sake of practice the two models are compared using the AIC criteria. AIC of the base model is `r model1_summary$aic` and for the model 2 (the simpler model) AIC is `r model2_summary$aic`. The model 2 has a higher AIC, so if both models were valid, model 1 would be preferred. Despite the fewer parameters of model 2, it has a higher deviance of `r model2_summary$deviance` compared to the deviance of `r model1_summary$deviance` of the model 1, thus resulting in a higher AIC.
+
+# Part 4: Conclusion
+This study aims to predict whether a client decides to subscribe to a term deposit based on available data (predictors). To select suitable predictors, a exploratory data analysis is performed. Some predictors are removed throughout the analysis and some are modified to binary predictors. Two logistic regression models are created. The model assumptions were checked for both models and independence of errors is rejected for both models, so the models cannot be considered valid. The AIC of both models were compared. If the models were valid, the model 1 would be preferred.
+
+## References
+1. Bachmann, J. (2017, November 12). Bank Marketing Dataset. Retrieved April 8, 2023, from https://www.kaggle.com/datasets/janiobachmann/bank-marketing-dataset?resource=download
+2. Moro, S., Cortez, P., &amp; Rita, P. (2014). A data-driven approach to predict the success of bank telemarketing. Decision Support Systems, 62, 22-31. doi:10.1016/j.dss.2014.03.001
+
+\newpage
+# Appendix
+
+## Variables definition
+
+### Candidate predictor variables
+1. age: (numeric)
+2. job: type of job (categorical: 'admin.','blue-collar','entrepreneur','housemaid','management','retired','self-employed','services','student','technician','unemployed','unknown')
+3. marital: marital status (categorical: 'divorced','married','single','unknown'; note: 'divorced' means divorced or widowed)
+4. education: (categorical: primary, secondary, tertiary and unknown)
+5. default: has credit in default? (categorical: 'no','yes','unknown')
+6. housing: has housing loan? (categorical: 'no','yes','unknown')
+7. loan: has personal loan? (categorical: 'no','yes','unknown')
+8. balance: Balance of the individual.
+9. contact: contact communication type (categorical: 'cellular','telephone')
+10. month: last contact month of year (categorical: 'jan', 'feb', 'mar', ..., 'nov', 'dec')
+11. day: last contact day of the week (categorical: 'mon','tue','wed','thu','fri')
+12. duration: last contact duration, in seconds (numeric). Important note: this attribute highly affects the output target (e.g., if duration=0 then y='no'). Yet, the duration is not known before a call is performed. Also, after the end of the call y is obviously known. Thus, this input should only be included for benchmark purposes and should be discarded if the intention is to have a realistic predictive model.
+13. campaign: number of contacts performed during this campaign and for this client (numeric, includes last contact)
+14. pdays: number of days that passed by after the client was last contacted from a previous campaign (numeric; 999 means client was not previously contacted)
+15. previous: number of contacts performed before this campaign and for this client (numeric)
+16. poutcome: outcome of the previous marketing campaign (categorical: 'failure','nonexistent','success')  
+
+### Outcome variable
+17. y - has the client subscribed a term deposit? (binary: 'yes','no')
+
+## Code
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=TRUE, fig.height=5, fig.width=6, fig.align='center', theme_set(theme(title = element_text(size=12)))}
+```
+
+
